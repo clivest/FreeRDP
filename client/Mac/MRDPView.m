@@ -164,14 +164,14 @@ DWORD mac_client_thread(void* param)
 	@autoreleasepool
 	{
 		int status;
-		HANDLE events[4];
+		HANDLE events[16];
 		HANDLE inputEvent;
 		HANDLE inputThread = NULL;
 		HANDLE updateEvent;
 		HANDLE updateThread = NULL;
-		HANDLE channelsEvent;
-		
 		DWORD nCount;
+		DWORD nCountTmp;
+		DWORD nCountBase;
 		rdpContext* context = (rdpContext*) param;
 		mfContext* mfc = (mfContext*) context;
 		freerdp* instance = context->instance;
@@ -202,7 +202,12 @@ DWORD mac_client_thread(void* param)
 		}
 		else
 		{
-			events[nCount++] = updateEvent = freerdp_get_message_queue_event_handle(instance, FREERDP_UPDATE_MESSAGE_QUEUE);
+			if (!(updateEvent = freerdp_get_message_queue_event_handle(instance, FREERDP_UPDATE_MESSAGE_QUEUE)))
+			{
+				WLog_ERR(TAG, "failed to get update event handle");
+				goto disconnect;
+			}
+			events[nCount++] = updateEvent;
 		}
 		
 		if (settings->AsyncInput)
@@ -215,20 +220,44 @@ DWORD mac_client_thread(void* param)
 		}
 		else
 		{
-			events[nCount++] = inputEvent = freerdp_get_message_queue_event_handle(instance, FREERDP_INPUT_MESSAGE_QUEUE);
-		}
-		
-		events[nCount++] = channelsEvent = freerdp_channels_get_event_handle(instance);
-		
-		while (1)
-		{
-			status = WaitForMultipleObjects(nCount, events, FALSE, INFINITE);
-			
-			if (WaitForSingleObject(mfc->stopEvent, 0) == WAIT_OBJECT_0)
+			if (!(inputEvent = freerdp_get_message_queue_event_handle(instance, FREERDP_INPUT_MESSAGE_QUEUE)))
 			{
+				WLog_ERR(TAG, "failed to get input event handle");
+				goto disconnect;
+			}
+			events[nCount++] = inputEvent;
+		}
+
+		nCountBase = nCount;
+
+		while (!freerdp_shall_disconnect(instance))
+		{
+			nCount = nCountBase;
+
+			if (!settings->AsyncTransport)
+			{
+				if (!(nCountTmp = freerdp_get_event_handles(context, &events[nCount], 16 - nCount)))
+				{
+					WLog_ERR(TAG, "freerdp_get_event_handles failed");
+					break;
+				}
+				nCount += nCountTmp;
+			}
+
+			status = WaitForMultipleObjects(nCount, events, FALSE, INFINITE);
+
+			if (status >= (WAIT_OBJECT_0 + nCount))
+			{
+				WLog_ERR(TAG, "WaitForMultipleObjects failed (0x%08X)", status);
 				break;
 			}
-			
+
+			if (status == WAIT_OBJECT_0)
+			{
+				/* stop event triggered */
+				break;
+			}
+
 			if (!settings->AsyncUpdate)
 			{
 				if (WaitForSingleObject(updateEvent, 0) == WAIT_OBJECT_0)
@@ -236,7 +265,7 @@ DWORD mac_client_thread(void* param)
 					update_activity_cb(instance);
 				}
 			}
-			
+
 			if (!settings->AsyncInput)
 			{
 				if (WaitForSingleObject(inputEvent, 0) == WAIT_OBJECT_0)
@@ -244,13 +273,17 @@ DWORD mac_client_thread(void* param)
 					input_activity_cb(instance);
 				}
 			}
-			
-			if (WaitForSingleObject(channelsEvent, 0) == WAIT_OBJECT_0)
+
+			if (!settings->AsyncTransport)
 			{
-				freerdp_channels_process_pending_messages(instance);
+				if (!freerdp_check_event_handles(context))
+				{
+					WLog_ERR(TAG, "freerdp_check_event_handles failed");
+					break;
+				}
 			}
 		}
-		
+
 disconnect:
 
 		freerdp_disconnect(instance);
@@ -265,7 +298,7 @@ disconnect:
 			}
 			CloseHandle(updateThread);
 		}
-		
+
 		if (settings->AsyncInput && inputThread)
 		{
 			wMessageQueue* inputQueue = freerdp_get_message_queue(instance, FREERDP_INPUT_MESSAGE_QUEUE);
@@ -276,7 +309,7 @@ disconnect:
 			}
 			CloseHandle(inputThread);
 		}
-		
+
 		ExitThread(0);
 		return 0;
 	}
@@ -693,18 +726,14 @@ DWORD fixKeyCode(DWORD keyCode, unichar keyChar, enum APPLE_KEYBOARD_TYPE type)
 	int i;
 
 	for (i = 0; i < argc; i++)
-	{
-		if (argv[i])
-			free(argv[i]);
-	}
-	
+		free(argv[i]);
+
 	if (!is_connected)
 		return;
-	
+
 	gdi_free(context->instance);
-	
-	if (pixel_data)
-		free(pixel_data);
+
+	free(pixel_data);
 }
 
 - (void) drawRect:(NSRect)rect
@@ -967,9 +996,11 @@ BOOL mac_post_connect(freerdp* instance)
 	//else
 	//	flags |= CLRBUF_16BPP;
 	
-	gdi_init(instance, flags, NULL);
-	gdi = instance->context->gdi;
+	if (!gdi_init(instance, flags, NULL))
+		return FALSE;
 	
+	gdi = instance->context->gdi;
+
 	view->bitmap_context = mac_create_bitmap_context(instance->context);
 	
 	pointer_cache_register_callbacks(instance->update);
@@ -1245,7 +1276,8 @@ BOOL mac_desktop_resize(rdpContext* context)
 	mfc->width = settings->DesktopWidth;
 	mfc->height = settings->DesktopHeight;
 	
-	gdi_resize(context->gdi, mfc->width, mfc->height);
+	if (!gdi_resize(context->gdi, mfc->width, mfc->height))
+		return FALSE;
 	
 	view->bitmap_context = mac_create_bitmap_context(context);
 	if (!view->bitmap_context)
