@@ -79,21 +79,28 @@ SMARTCARD_CONTEXT* smartcard_context_new(SMARTCARD_DEVICE* smartcard, SCARDCONTE
 	SMARTCARD_CONTEXT* pContext;
 
 	pContext = (SMARTCARD_CONTEXT*) calloc(1, sizeof(SMARTCARD_CONTEXT));
-
 	if (!pContext)
 		return pContext;
 
 	pContext->smartcard = smartcard;
-
 	pContext->hContext = hContext;
 
 	pContext->IrpQueue = MessageQueue_New(NULL);
+	if (!pContext->IrpQueue)
+		goto error_irpqueue;
 
 	pContext->thread = CreateThread(NULL, 0,
 			(LPTHREAD_START_ROUTINE) smartcard_context_thread,
 			pContext, 0, NULL);
-
+	if (!pContext->thread)
+		goto error_thread;
 	return pContext;
+
+error_thread:
+	MessageQueue_Free(pContext->IrpQueue);
+error_irpqueue:
+	free(pContext);
+	return NULL;
 }
 
 void smartcard_context_free(SMARTCARD_CONTEXT* pContext)
@@ -103,9 +110,8 @@ void smartcard_context_free(SMARTCARD_CONTEXT* pContext)
 
 	/* cancel blocking calls like SCardGetStatusChange */
 	SCardCancel(pContext->hContext);
-
-	MessageQueue_PostQuit(pContext->IrpQueue, 0);
-	WaitForSingleObject(pContext->thread, INFINITE);
+	if (MessageQueue_PostQuit(pContext->IrpQueue, 0))
+		WaitForSingleObject(pContext->thread, INFINITE);
 	CloseHandle(pContext->thread);
 
 	MessageQueue_Free(pContext->IrpQueue);
@@ -113,64 +119,21 @@ void smartcard_context_free(SMARTCARD_CONTEXT* pContext)
 	free(pContext);
 }
 
-static void smartcard_free(DEVICE* device)
-{
-	SMARTCARD_DEVICE* smartcard = (SMARTCARD_DEVICE*) device;
-
-	if (smartcard->IrpQueue)
-	{
-		MessageQueue_PostQuit(smartcard->IrpQueue, 0);
-		WaitForSingleObject(smartcard->thread, INFINITE);
-
-		MessageQueue_Free(smartcard->IrpQueue);
-		smartcard->IrpQueue = NULL;
-
-		CloseHandle(smartcard->thread);
-		smartcard->thread = NULL;
-	}
-
-	if (smartcard->device.data)
-	{
-		Stream_Free(smartcard->device.data, TRUE);
-		smartcard->device.data = NULL;
-	}
-
-	ListDictionary_Free(smartcard->rgSCardContextList);
-	ListDictionary_Free(smartcard->rgOutstandingMessages);
-	Queue_Free(smartcard->CompletedIrpQueue);
-
-	if (smartcard->StartedEvent)
-	{
-		SCardReleaseStartedEvent();
-		smartcard->StartedEvent = NULL;
-	}
-
-	free(device);
-}
-
-/**
- * Initialization occurs when the protocol server sends a device announce message.
- * At that time, we need to cancel all outstanding IRPs.
- */
-
-static void smartcard_init(DEVICE* device)
-{
+static void smartcard_release_all_contexts(SMARTCARD_DEVICE* smartcard) {
 	int index;
 	int keyCount;
 	ULONG_PTR* pKeys;
 	SCARDCONTEXT hContext;
 	SMARTCARD_CONTEXT* pContext;
-	SMARTCARD_DEVICE* smartcard = (SMARTCARD_DEVICE*) device;
 
 	/**
 	 * On protocol termination, the following actions are performed:
-	 * For each context in rgSCardContextList, SCardCancel is called causing all outstanding messages to be processed.
-	 * After there are no more outstanding messages, SCardReleaseContext is called on each context and the context MUST
-	 * be removed from rgSCardContextList.
+	 * For each context in rgSCardContextList, SCardCancel is called causing all SCardGetStatusChange calls to be processed.
+	 * After that, SCardReleaseContext is called on each context and the context MUST be removed from rgSCardContextList.
 	 */
 
 	/**
-	 * Call SCardCancel on existing contexts, unblocking all outstanding IRPs.
+	 * Call SCardCancel on existing contexts, unblocking all outstanding SCardGetStatusChange calls.
 	 */
 
 	if (ListDictionary_Count(smartcard->rgSCardContextList) > 0)
@@ -187,7 +150,7 @@ static void smartcard_init(DEVICE* device)
 
 			hContext = pContext->hContext;
 
-			if (SCardIsValidContext(hContext))
+			if (SCardIsValidContext(hContext) == SCARD_S_SUCCESS)
 			{
 				SCardCancel(hContext);
 			}
@@ -214,7 +177,7 @@ static void smartcard_init(DEVICE* device)
 
 			hContext = pContext->hContext;
 
-			if (SCardIsValidContext(hContext))
+			if (SCardIsValidContext(hContext) == SCARD_S_SUCCESS)
 			{
 				SCardReleaseContext(hContext);
 			}
@@ -222,6 +185,64 @@ static void smartcard_init(DEVICE* device)
 
 		free(pKeys);
 	}
+
+}
+
+static void smartcard_free(DEVICE* device)
+{
+	SMARTCARD_DEVICE* smartcard = (SMARTCARD_DEVICE*) device;
+
+	/**
+	 * Calling smartcard_release_all_contexts to unblock all operations waiting for transactions
+	 * to unlock.
+	 */
+	smartcard_release_all_contexts(smartcard);
+
+	/* Stopping all threads and cancelling all IRPs */
+
+	if (smartcard->IrpQueue)
+	{
+		if (MessageQueue_PostQuit(smartcard->IrpQueue, 0))
+			WaitForSingleObject(smartcard->thread, INFINITE);
+
+		MessageQueue_Free(smartcard->IrpQueue);
+		smartcard->IrpQueue = NULL;
+
+		CloseHandle(smartcard->thread);
+		smartcard->thread = NULL;
+	}
+
+	if (smartcard->device.data)
+	{
+		Stream_Free(smartcard->device.data, TRUE);
+		smartcard->device.data = NULL;
+	}
+
+	ListDictionary_Free(smartcard->rgSCardContextList);
+	ListDictionary_Free(smartcard->rgOutstandingMessages);
+	Queue_Free(smartcard->CompletedIrpQueue);
+
+
+	if (smartcard->StartedEvent)
+	{
+		SCardReleaseStartedEvent();
+		smartcard->StartedEvent = NULL;
+	}
+
+	free(device);
+}
+
+/**
+ * Initialization occurs when the protocol server sends a device announce message.
+ * At that time, we need to cancel all outstanding IRPs.
+ */
+
+static void smartcard_init(DEVICE* device)
+{
+	SMARTCARD_DEVICE* smartcard = (SMARTCARD_DEVICE*) device;
+
+	smartcard_release_all_contexts(smartcard);
+
 }
 
 void smartcard_complete_irp(SMARTCARD_DEVICE* smartcard, IRP* irp)
@@ -486,7 +507,6 @@ int DeviceServiceEntry(PDEVICE_SERVICE_ENTRY_POINTS pEntryPoints)
 	path = device->Path;
 
 	smartcard = (SMARTCARD_DEVICE*) calloc(1, sizeof(SMARTCARD_DEVICE));
-
 	if (!smartcard)
 		return -1;
 
@@ -498,6 +518,8 @@ int DeviceServiceEntry(PDEVICE_SERVICE_ENTRY_POINTS pEntryPoints)
 
 	length = strlen(smartcard->device.name);
 	smartcard->device.data = Stream_New(NULL, length + 1);
+	if (!smartcard->device.data)
+		goto error_device_data;
 
 	Stream_Write(smartcard->device.data, "SCARD", 6);
 
@@ -518,23 +540,47 @@ int DeviceServiceEntry(PDEVICE_SERVICE_ENTRY_POINTS pEntryPoints)
 	}
 
 	smartcard->IrpQueue = MessageQueue_New(NULL);
+	if (!smartcard->IrpQueue)
+		goto error_irp_queue;
 
 	smartcard->CompletedIrpQueue = Queue_New(TRUE, -1, -1);
+	if (!smartcard->CompletedIrpQueue)
+		goto error_completed_irp_queue;
 
 	smartcard->rgSCardContextList = ListDictionary_New(TRUE);
+	if (!smartcard->rgSCardContextList)
+		goto error_context_list;
 
 	ListDictionary_ValueObject(smartcard->rgSCardContextList)->fnObjectFree =
 			(OBJECT_FREE_FN) smartcard_context_free;
 
 	smartcard->rgOutstandingMessages = ListDictionary_New(TRUE);
+	if (!smartcard->rgOutstandingMessages)
+		goto error_outstanding_messages;
 
 	smartcard->thread = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE) smartcard_thread_func,
 			smartcard, CREATE_SUSPENDED, NULL);
+	if (!smartcard->thread)
+		goto error_thread;
 
 	pEntryPoints->RegisterDevice(pEntryPoints->devman, (DEVICE*) smartcard);
 
 	ResumeThread(smartcard->thread);
 
 	return 0;
+
+error_thread:
+	ListDictionary_Free(smartcard->rgOutstandingMessages);
+error_outstanding_messages:
+	ListDictionary_Free(smartcard->rgSCardContextList);
+error_context_list:
+	Queue_Free(smartcard->CompletedIrpQueue);
+error_completed_irp_queue:
+	MessageQueue_Free(smartcard->IrpQueue);
+error_irp_queue:
+	Stream_Free(smartcard->device.data, TRUE);
+error_device_data:
+	free(smartcard);
+	return -1;
 }
 

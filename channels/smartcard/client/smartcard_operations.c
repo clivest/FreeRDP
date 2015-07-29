@@ -215,6 +215,7 @@ static UINT32 smartcard_EstablishContext_Call(SMARTCARD_DEVICE* smartcard, SMART
 	{
 		SMARTCARD_CONTEXT* pContext;
 		void* key = (void*)(size_t) hContext;
+		// TODO: handle return values
 		pContext = smartcard_context_new(smartcard, hContext);
 		ListDictionary_Add(smartcard->rgSCardContextList, key, (void*) pContext);
 	}
@@ -319,17 +320,14 @@ static UINT32 smartcard_ListReadersA_Call(SMARTCARD_DEVICE* smartcard, SMARTCARD
 		call->mszGroups = NULL;
 	}
 
-	if (status != SCARD_S_SUCCESS)
-		return status;
-
 	smartcard_trace_list_readers_return(smartcard, &ret, FALSE);
 	status = smartcard_pack_list_readers_return(smartcard, irp->output, &ret);
 
-	if (status != SCARD_S_SUCCESS)
-		return status;
-
 	if (mszReaders)
 		SCardFreeMemory(operation->hContext, mszReaders);
+
+	if (status != SCARD_S_SUCCESS)
+		return status;
 
 	return ret.ReturnCode;
 }
@@ -372,18 +370,14 @@ static UINT32 smartcard_ListReadersW_Call(SMARTCARD_DEVICE* smartcard, SMARTCARD
 		call->mszGroups = NULL;
 	}
 
-	if (status != SCARD_S_SUCCESS)
-		return status;
-
 	smartcard_trace_list_readers_return(smartcard, &ret, TRUE);
-
 	status = smartcard_pack_list_readers_return(smartcard, irp->output, &ret);
-
-	if (status != SCARD_S_SUCCESS)
-		return status;
 
 	if (mszReaders)
 		SCardFreeMemory(operation->hContext, mszReaders);
+
+	if (status != SCARD_S_SUCCESS)
+		return status;
 
 	return ret.ReturnCode;
 }
@@ -443,7 +437,7 @@ static UINT32 smartcard_GetStatusChangeA_Call(SMARTCARD_DEVICE* smartcard, SMART
 		for (index = 0; index < call->cReaders; index++)
 		{
 			rgReaderState = &call->rgReaderStates[index];
-			free(rgReaderState->szReader);
+			free((void *)rgReaderState->szReader);
 		}
 
 		free(call->rgReaderStates);
@@ -506,7 +500,7 @@ static UINT32 smartcard_GetStatusChangeW_Call(SMARTCARD_DEVICE* smartcard, SMART
 		for (index = 0; index < call->cReaders; index++)
 		{
 			rgReaderState = &call->rgReaderStates[index];
-			free(rgReaderState->szReader);
+			free((void *)rgReaderState->szReader);
 		}
 
 		free(call->rgReaderStates);

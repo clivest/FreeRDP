@@ -52,7 +52,10 @@ BOOL update_recv_orders(rdpUpdate* update, wStream* s)
 	UINT16 numberOrders;
 
 	if (Stream_GetRemainingLength(s) < 6)
+	{
+		WLog_ERR(TAG, "Stream_GetRemainingLength(s) < 6");
 		return FALSE;
+	}
 
 	Stream_Seek_UINT16(s); /* pad2OctetsA (2 bytes) */
 	Stream_Read_UINT16(s, numberOrders); /* numberOrders (2 bytes) */
@@ -61,7 +64,10 @@ BOOL update_recv_orders(rdpUpdate* update, wStream* s)
 	while (numberOrders > 0)
 	{
 		if (!update_recv_order(update, s))
+		{
+			WLog_ERR(TAG, "update_recv_order() failed");
 			return FALSE;
+		}
 
 		numberOrders--;
 	}
@@ -488,7 +494,10 @@ BOOL update_recv(rdpUpdate* update, wStream* s)
 	rdpContext* context = update->context;
 
 	if (Stream_GetRemainingLength(s) < 2)
+	{
+		WLog_ERR(TAG, "Stream_GetRemainingLength(s) < 2");
 		return FALSE;
+	}
 
 	Stream_Read_UINT16(s, updateType); /* updateType (2 bytes) */
 	//WLog_DBG(TAG, "%s Update Data PDU", UPDATE_TYPE_STRINGS[updateType]);
@@ -501,19 +510,26 @@ BOOL update_recv(rdpUpdate* update, wStream* s)
 			if (!update_recv_orders(update, s))
 			{
 				/* XXX: Do we have to call EndPaint? */
+				WLog_ERR(TAG, "UPDATE_TYPE_ORDERS - update_recv_orders() failed");
 				return FALSE;
 			}
 			break;
 
 		case UPDATE_TYPE_BITMAP:
 			if (!update_read_bitmap_update(update, s, &update->bitmap_update))
+			{
+				WLog_ERR(TAG, "UPDATE_TYPE_BITMAP - update_read_bitmap_update() failed");
 				return FALSE;
+			}
 			IFCALL(update->BitmapUpdate, context, &update->bitmap_update);
 			break;
 
 		case UPDATE_TYPE_PALETTE:
 			if (!update_read_palette(update, s, &update->palette_update))
+			{
+				WLog_ERR(TAG, "UPDATE_TYPE_PALETTE - update_read_palette() failed");
 				return FALSE;
+			}
 			IFCALL(update->Palette, context, &update->palette_update);
 			break;
 
@@ -1816,6 +1832,8 @@ BOOL update_read_refresh_rect(rdpUpdate* update, wStream* s)
 		return FALSE;
 
 	areas = (RECTANGLE_16*) malloc(sizeof(RECTANGLE_16) * numberOfAreas);
+	if (!areas)
+		return FALSE;
 
 	for (index = 0; index < numberOfAreas; index++)
 	{
@@ -1933,42 +1951,73 @@ rdpUpdate* update_new(rdpRdp* rdp)
 {
 	const wObject cb = { NULL, NULL, NULL,  update_free_queued_message, NULL };
 	rdpUpdate* update;
+	OFFSCREEN_DELETE_LIST* deleteList;
 
-	update = (rdpUpdate*) calloc(1, sizeof(rdpUpdate));
+	update = (rdpUpdate *) calloc(1, sizeof(rdpUpdate));
+	if (!update)
+		return NULL;
 
-	if (update)
-	{
-		OFFSCREEN_DELETE_LIST* deleteList;
+	WLog_Init();
+	update->log = WLog_Get("com.freerdp.core.update");
 
-		WLog_Init();
-		update->log = WLog_Get("com.freerdp.core.update");
+	update->bitmap_update.count = 64;
+	update->bitmap_update.rectangles = (BITMAP_DATA*) calloc(update->bitmap_update.count, sizeof(BITMAP_DATA));
+	if (!update->bitmap_update.rectangles)
+		goto error_rectangles;
 
-		update->bitmap_update.count = 64;
-		update->bitmap_update.rectangles = (BITMAP_DATA*) calloc(update->bitmap_update.count, sizeof(BITMAP_DATA));
+	update->pointer = (rdpPointerUpdate*) calloc(1, sizeof(rdpPointerUpdate));
+	if (!update->pointer)
+		goto error_pointer;
 
-		update->pointer = (rdpPointerUpdate*) calloc(1, sizeof(rdpPointerUpdate));
+	update->primary = (rdpPrimaryUpdate*) calloc(1, sizeof(rdpPrimaryUpdate));
+	if (!update->primary)
+		goto error_primary;
 
-		update->primary = (rdpPrimaryUpdate*) calloc(1, sizeof(rdpPrimaryUpdate));
+	update->secondary = (rdpSecondaryUpdate*) calloc(1, sizeof(rdpSecondaryUpdate));
+	if (!update->secondary)
+		goto error_secondary;
 
-		update->secondary = (rdpSecondaryUpdate*) calloc(1, sizeof(rdpSecondaryUpdate));
+	update->altsec = (rdpAltSecUpdate*) calloc(1, sizeof(rdpAltSecUpdate));
+	if (!update->altsec)
+		goto error_altsec;
 
-		update->altsec = (rdpAltSecUpdate*) calloc(1, sizeof(rdpAltSecUpdate));
+	update->window = (rdpWindowUpdate*) calloc(1, sizeof(rdpWindowUpdate));
+	if (!update->window)
+		goto error_window;
 
-		update->window = (rdpWindowUpdate*) calloc(1, sizeof(rdpWindowUpdate));
+	deleteList = &(update->altsec->create_offscreen_bitmap.deleteList);
+	deleteList->sIndices = 64;
+	deleteList->indices = malloc(deleteList->sIndices * 2);
+	if (!deleteList->indices)
+		goto error_indices;
+	deleteList->cIndices = 0;
 
-		deleteList = &(update->altsec->create_offscreen_bitmap.deleteList);
-		deleteList->sIndices = 64;
-		deleteList->indices = malloc(deleteList->sIndices * 2);
-		deleteList->cIndices = 0;
+	update->SuppressOutput = update_send_suppress_output;
 
-		update->SuppressOutput = update_send_suppress_output;
+	update->initialState = TRUE;
 
-		update->initialState = TRUE;
-
-		update->queue = MessageQueue_New(&cb);
-	}
-
+	update->queue = MessageQueue_New(&cb);
+	if (!update->queue)
+		goto error_queue;
 	return update;
+
+error_queue:
+	free(deleteList->indices);
+error_indices:
+	free(update->window);
+error_window:
+	free(update->altsec);
+error_altsec:
+	free(update->secondary);
+error_secondary:
+	free(update->primary);
+error_primary:
+	free(update->pointer);
+error_pointer:
+	free(update->bitmap_update.rectangles);
+error_rectangles:
+	free(update);
+	return NULL;
 }
 
 void update_free(rdpUpdate* update)

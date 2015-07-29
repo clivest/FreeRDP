@@ -21,12 +21,15 @@
 #include "config.h"
 #endif
 
+#include <assert.h>
+
 #include "ntlm.h"
 #include "../sspi.h"
 
 #include <winpr/crt.h>
 #include <winpr/print.h>
 #include <winpr/sysinfo.h>
+#include <winpr/tchar.h>
 
 #include "ntlm_compute.h"
 
@@ -143,6 +146,7 @@ NTLM_AV_PAIR* ntlm_av_pair_add(NTLM_AV_PAIR* pAvPairList, NTLM_AV_ID AvId, PBYTE
 	if (!pAvPair)
 		return NULL;
 
+	assert(Value != NULL);
 	pAvPair->AvId = AvId;
 	pAvPair->AvLen = AvLen;
 	CopyMemory(ntlm_av_pair_get_value_pointer(pAvPair), Value, AvLen);
@@ -168,14 +172,14 @@ int ntlm_get_target_computer_name(PUNICODE_STRING pName, COMPUTER_NAME_FORMAT ty
 {
 	char* name;
 	int status;
-	DWORD nSize = 0;
-	GetComputerNameExA(type, NULL, &nSize);
-	name = (char*) malloc(nSize);
+	CHAR computerName[MAX_COMPUTERNAME_LENGTH + 1];
+	DWORD nSize = MAX_COMPUTERNAME_LENGTH;
 
-	if (!name)
+	if (!GetComputerNameExA(type, computerName, &nSize))
 		return -1;
 
-	if (!GetComputerNameExA(type, name, &nSize))
+	name = _strdup(computerName);
+	if (!name)
 		return -1;
 
 	if (type == ComputerNameNetBIOS)
@@ -184,7 +188,10 @@ int ntlm_get_target_computer_name(PUNICODE_STRING pName, COMPUTER_NAME_FORMAT ty
 	status = ConvertToUnicode(CP_UTF8, 0, name, -1, &pName->Buffer, 0);
 
 	if (status <= 0)
+	{
+		free(name);
 		return status;
+	}
 
 	pName->Length = (USHORT)((status - 1) * 2);
 	pName->MaximumLength = pName->Length;

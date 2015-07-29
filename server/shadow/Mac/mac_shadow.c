@@ -29,8 +29,8 @@
 #include "../shadow_client.h"
 #include "../shadow_surface.h"
 #include "../shadow_capture.h"
-#include "../shadow_encoder.h"
 #include "../shadow_subsystem.h"
+#include "../shadow_mcevent.h"
 
 #include "mac_shadow.h"
 
@@ -366,13 +366,7 @@ void (^mac_capture_stream_handler)(CGDisplayStreamFrameStatus, uint64_t, IOSurfa
 			
 		count = ArrayList_Count(server->clients);
 			
-		InitializeSynchronizationBarrier(&(subsystem->barrier), count + 1, -1);
-			
-		SetEvent(subsystem->updateEvent);
-			
-		EnterSynchronizationBarrier(&(subsystem->barrier), 0);
-		
-		DeleteSynchronizationBarrier(&(subsystem->barrier));
+		shadow_multiclient_publish_and_wait(subsystem->updateEvent);
 		
 		if (count == 1)
 		{
@@ -382,12 +376,10 @@ void (^mac_capture_stream_handler)(CGDisplayStreamFrameStatus, uint64_t, IOSurfa
 			
 			if (client)
 			{
-				subsystem->captureFrameRate = client->encoder->fps;
+				subsystem->captureFrameRate = shadow_encoder_preferred_fps(client->encoder);
 			}
 		}
 		
-		ResetEvent(subsystem->updateEvent);
-			
 		ArrayList_Unlock(server->clients);
 			
 		region16_clear(&(subsystem->invalidRegion));
@@ -459,48 +451,56 @@ int mac_shadow_screen_grab(macShadowSubsystem* subsystem)
 
 int mac_shadow_subsystem_process_message(macShadowSubsystem* subsystem, wMessage* message)
 {
-	if (message->id == SHADOW_MSG_IN_REFRESH_OUTPUT_ID)
+	switch(message->id)
 	{
-		UINT32 index;
-		SHADOW_MSG_IN_REFRESH_OUTPUT* msg = (SHADOW_MSG_IN_REFRESH_OUTPUT*) message->wParam;
-		
-		if (msg->numRects)
+		case SHADOW_MSG_IN_REFRESH_OUTPUT_ID:
 		{
-			for (index = 0; index < msg->numRects; index++)
+			UINT32 index;
+			SHADOW_MSG_IN_REFRESH_OUTPUT* msg = (SHADOW_MSG_IN_REFRESH_OUTPUT*) message->wParam;
+
+			if (msg->numRects)
+			{
+				for (index = 0; index < msg->numRects; index++)
+				{
+					region16_union_rect(&(subsystem->invalidRegion),
+							&(subsystem->invalidRegion), &msg->rects[index]);
+				}
+			}
+			else
+			{
+				RECTANGLE_16 refreshRect;
+
+				refreshRect.left = 0;
+				refreshRect.top = 0;
+				refreshRect.right = subsystem->width;
+				refreshRect.bottom = subsystem->height;
+
+				region16_union_rect(&(subsystem->invalidRegion),
+							&(subsystem->invalidRegion), &refreshRect);
+			}
+			break;
+		}
+		case SHADOW_MSG_IN_SUPPRESS_OUTPUT_ID:
+		{
+			SHADOW_MSG_IN_SUPPRESS_OUTPUT* msg = (SHADOW_MSG_IN_SUPPRESS_OUTPUT*) message->wParam;
+
+			subsystem->suppressOutput = (msg->allow) ? FALSE : TRUE;
+
+			if (msg->allow)
 			{
 				region16_union_rect(&(subsystem->invalidRegion),
-						    &(subsystem->invalidRegion), &msg->rects[index]);
+							&(subsystem->invalidRegion), &(msg->rect));
 			}
+			break;
 		}
-		else
-		{
-			RECTANGLE_16 refreshRect;
-			
-			refreshRect.left = 0;
-			refreshRect.top = 0;
-			refreshRect.right = subsystem->width;
-			refreshRect.bottom = subsystem->height;
-			
-			region16_union_rect(&(subsystem->invalidRegion),
-					    &(subsystem->invalidRegion), &refreshRect);
-		}
+		default:
+			WLog_ERR(TAG, "Unknown message id: %u", message->id);
+			break;
 	}
-	else if (message->id == SHADOW_MSG_IN_SUPPRESS_OUTPUT_ID)
-	{
-		SHADOW_MSG_IN_SUPPRESS_OUTPUT* msg = (SHADOW_MSG_IN_SUPPRESS_OUTPUT*) message->wParam;
-		
-		subsystem->suppressOutput = (msg->allow) ? FALSE : TRUE;
-		
-		if (msg->allow)
-		{
-			region16_union_rect(&(subsystem->invalidRegion),
-					    &(subsystem->invalidRegion), &(msg->rect));
-		}
-	}
-	
+
 	if (message->Free)
 		message->Free(message);
-	
+
 	return 1;
 }
 
@@ -667,7 +667,7 @@ macShadowSubsystem* mac_shadow_subsystem_new()
 	return subsystem;
 }
 
-int Mac_ShadowSubsystemEntry(RDP_SHADOW_ENTRY_POINTS* pEntryPoints)
+FREERDP_API int Mac_ShadowSubsystemEntry(RDP_SHADOW_ENTRY_POINTS* pEntryPoints)
 {
 	pEntryPoints->New = (pfnShadowSubsystemNew) mac_shadow_subsystem_new;
 	pEntryPoints->Free = (pfnShadowSubsystemFree) mac_shadow_subsystem_free;

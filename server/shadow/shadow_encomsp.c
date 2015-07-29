@@ -109,3 +109,11 @@ int shadow_client_encomsp_init(rdpShadowClient* client)
 	return 1;
 }
 
+void shadow_client_encomsp_uninit(rdpShadowClient* client)
+{
+	if (client->encomsp) {
+		client->encomsp->Stop(client->encomsp);
+		encomsp_server_context_free(client->encomsp);
+		client->encomsp = NULL;
+	}
+}

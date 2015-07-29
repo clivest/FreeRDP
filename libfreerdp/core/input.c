@@ -498,7 +498,7 @@ BOOL input_recv(rdpInput* input, wStream* s)
 	return TRUE;
 }
 
-void input_register_client_callbacks(rdpInput* input)
+BOOL input_register_client_callbacks(rdpInput* input)
 {
 	rdpSettings* settings = input->context->settings;
 
@@ -528,7 +528,10 @@ void input_register_client_callbacks(rdpInput* input)
 	if (input->asynchronous)
 	{
 		input->proxy = input_message_proxy_new(input);
+		if (!input->proxy)
+			return FALSE;
 	}
+	return TRUE;
 }
 
 BOOL freerdp_input_send_synchronize_event(rdpInput* input, UINT32 flags)
@@ -590,13 +593,15 @@ rdpInput* input_new(rdpRdp* rdp)
 	const wObject cb = { NULL, NULL, NULL, input_free_queued_message, NULL };
 	rdpInput* input;
 
-	input = (rdpInput*) malloc(sizeof(rdpInput));
+	input = (rdpInput*) calloc(1, sizeof(rdpInput));
+	if (!input)
+		return NULL;
 
-	if (input != NULL)
+	input->queue = MessageQueue_New(&cb);
+	if (!input->queue)
 	{
-		ZeroMemory(input, sizeof(rdpInput));
-
-		input->queue = MessageQueue_New(&cb);
+		free(input);
+		return NULL;
 	}
 
 	return input;

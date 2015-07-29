@@ -4,6 +4,8 @@
  *
  * Copyright 2011 Jiten Pathy
  * Copyright 2011 Marc-Andre Moreau <marcandre.moreau@gmail.com>
+ * Copyright 2015 Thincast Technologies GmbH
+ * Copyright 2015 DI (FH) Martin Haimberger <martin.haimberger@thincast.com>
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -630,6 +632,13 @@ BOOL certificate_read_server_certificate(rdpCertificate* certificate, BYTE* serv
 		return TRUE;
 
 	s = Stream_New(server_cert, length);
+
+	if (!s)
+	{
+		WLog_ERR(TAG, "Stream_New failed!");
+		return FALSE;
+	}
+
 	Stream_Read_UINT32(s, dwVersion); /* dwVersion (4 bytes) */
 
 	switch (dwVersion & CERT_CHAIN_VERSION_MASK)
@@ -675,16 +684,20 @@ rdpRsaKey* key_new(const char* keyfile)
 		goto out_free;
 	}
 
-	fseek(fp, 0, SEEK_END);
-	length = ftell(fp);
-	fseek(fp, 0, SEEK_SET);
+	if (fseek(fp, 0, SEEK_END) < 0)
+		goto out_free;
+	if ((length = ftell(fp)) < 0)
+		goto out_free;
+	if (fseek(fp, 0, SEEK_SET) < 0)
+		goto out_free;
 
 	buffer = (BYTE*) malloc(length);
 
 	if (!buffer)
 		goto out_free;
 
-	fread((void*) buffer, length, 1, fp);
+	if (fread((void*) buffer, length, 1, fp) != 1)
+		goto out_free;
 	fclose(fp);
 	fp = NULL;
 
@@ -694,7 +707,6 @@ rdpRsaKey* key_new(const char* keyfile)
 		goto out_free;
 
 	rsa = PEM_read_bio_RSAPrivateKey(bio, NULL, NULL, NULL);
-
 	BIO_free(bio);
 	free(buffer);
 	buffer = NULL;
@@ -747,6 +759,7 @@ rdpRsaKey* key_new(const char* keyfile)
 	crypto_reverse(key->exponent, sizeof(key->exponent));
 	RSA_free(rsa);
 	return key;
+
 out_free_modulus:
 	free(key->Modulus);
 out_free_rsa:
@@ -782,6 +795,8 @@ rdpCertificate* certificate_clone(rdpCertificate* certificate)
 	if (certificate->cert_info.ModulusLength)
 	{
 		_certificate->cert_info.Modulus = (BYTE*) malloc(certificate->cert_info.ModulusLength);
+		if (!_certificate->cert_info.Modulus)
+			goto out_fail;
 		CopyMemory(_certificate->cert_info.Modulus, certificate->cert_info.Modulus, certificate->cert_info.ModulusLength);
 		_certificate->cert_info.ModulusLength = certificate->cert_info.ModulusLength;
 	}
@@ -789,11 +804,15 @@ rdpCertificate* certificate_clone(rdpCertificate* certificate)
 	if (certificate->x509_cert_chain)
 	{
 		_certificate->x509_cert_chain = (rdpX509CertChain*) malloc(sizeof(rdpX509CertChain));
+		if (!_certificate->x509_cert_chain)
+			goto out_fail;
 		CopyMemory(_certificate->x509_cert_chain, certificate->x509_cert_chain, sizeof(rdpX509CertChain));
 
 		if (certificate->x509_cert_chain->count)
 		{
 			_certificate->x509_cert_chain->array = (rdpCertBlob*) calloc(certificate->x509_cert_chain->count, sizeof(rdpCertBlob));
+			if (!_certificate->x509_cert_chain->array)
+				goto out_fail;
 
 			for (index = 0; index < certificate->x509_cert_chain->count; index++)
 			{
@@ -802,6 +821,15 @@ rdpCertificate* certificate_clone(rdpCertificate* certificate)
 				if (certificate->x509_cert_chain->array[index].length)
 				{
 					_certificate->x509_cert_chain->array[index].data = (BYTE*) malloc(certificate->x509_cert_chain->array[index].length);
+					if (!_certificate->x509_cert_chain->array[index].data)
+					{
+						for (--index; index >= 0; --index)
+						{
+							if (certificate->x509_cert_chain->array[index].length)
+								free(_certificate->x509_cert_chain->array[index].data);
+						}
+						goto out_fail;
+					}
 					CopyMemory(_certificate->x509_cert_chain->array[index].data, certificate->x509_cert_chain->array[index].data,
 							_certificate->x509_cert_chain->array[index].length);
 				}
@@ -810,6 +838,16 @@ rdpCertificate* certificate_clone(rdpCertificate* certificate)
 	}
 
 	return _certificate;
+
+out_fail:
+	if (_certificate->x509_cert_chain)
+	{
+		free(_certificate->x509_cert_chain->array);
+		free(_certificate->x509_cert_chain);
+	}
+	free(_certificate->cert_info.Modulus);
+	free(_certificate);
+	return NULL;
 }
 
 /**

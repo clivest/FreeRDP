@@ -552,6 +552,8 @@ BOOL xf_create_window(xfContext* xfc)
 		if (settings->WindowTitle)
 		{
 			windowTitle = _strdup(settings->WindowTitle);
+			if (!windowTitle)
+				return FALSE;
 		}
 		else if (settings->ServerPort == 3389)
 		{
@@ -992,13 +994,15 @@ BOOL xf_pre_connect(freerdp* instance)
 	freerdp_client_load_addins(channels, instance->settings);
 	freerdp_channels_pre_connect(channels, instance);
 
-	if (!settings->Username)
+	if (!settings->Username && !settings->CredentialsFromStdin)
 	{
 		char* login_name = getlogin();
 
 		if (login_name)
 		{
 			settings->Username = _strdup(login_name);
+			if (!settings->Username)
+				return FALSE;
 			WLog_INFO(TAG, "No user name set. - Using login name: %s", settings->Username);
 		}
 	}
@@ -1016,9 +1020,13 @@ BOOL xf_pre_connect(freerdp* instance)
 	}
 
 	if (!context->cache)
-		context->cache = cache_new(settings);
+	{
+		if (!(context->cache = cache_new(settings)))
+			return FALSE;
+	}
 
-	xf_keyboard_init(xfc);
+	if (!xf_keyboard_init(xfc))
+		return FALSE;
 
 	xf_detect_monitors(xfc, &maxWidth, &maxHeight);
 
@@ -1093,9 +1101,11 @@ BOOL xf_post_connect(freerdp* instance)
 
 		gdi = context->gdi;
 		xfc->primary_buffer = gdi->primary_buffer;
+		xfc->palette = gdi->palette;
 	}
 	else
 	{
+		xfc->palette = xfc->palette_hwgdi;
 		xfc->srcBpp = settings->ColorDepth;
 		xf_gdi_register_update_callbacks(update);
 	}
@@ -1163,7 +1173,8 @@ BOOL xf_post_connect(freerdp* instance)
 	update->SetKeyboardIndicators = xf_keyboard_set_indicators;
 
 	xfc->clipboard = xf_clipboard_new(xfc);
-	freerdp_channels_post_connect(channels, instance);
+	if (freerdp_channels_post_connect(channels, instance) < 0)
+		return FALSE;
 
 	EventArgsInit(&e, "xfreerdp");
 	e.width = settings->DesktopWidth;
@@ -1184,6 +1195,8 @@ static void xf_post_disconnect(freerdp* instance)
 	context = instance->context;
 	xfc = (xfContext*) context;
 
+	freerdp_channels_disconnect(context->channels, instance);
+
 	gdi_free(instance);
 
 	if (xfc->clipboard)
@@ -1201,8 +1214,6 @@ static void xf_post_disconnect(freerdp* instance)
 	}
 
 	xf_keyboard_free(xfc);
-
-	freerdp_channels_disconnect(context->channels, instance);
 }
 
 /** Callback set in the rdp_freerdp structure, and used to get the user's password,
@@ -1217,16 +1228,93 @@ static void xf_post_disconnect(freerdp* instance)
  *  @param domain - unused
  *  @return TRUE if a password was successfully entered. See freerdp_passphrase_read() for more details.
  */
-BOOL xf_authenticate(freerdp* instance, char** username, char** password, char** domain)
+static BOOL xf_authenticate_raw(freerdp* instance, BOOL gateway, char** username,
+		char** password, char** domain)
 {
-	// FIXME: seems this callback may be called when 'username' is not known.
-	// But it doesn't do anything to fix it...
-	*password = malloc(password_size * sizeof(char));
+	const char* auth[] =
+	{
+		"Username: ",
+		"Domain:   ",
+		"Password: "
+	};
+	const char* gw[] =
+	{
+		"GatewayUsername: ",
+		"GatewayDomain:   ",
+		"GatewayPassword: "
+	};
+	const char** prompt = (gateway) ? gw : auth;
 
-	if (freerdp_passphrase_read("Password: ", *password, password_size, instance->settings->CredentialsFromStdin) == NULL)
+	if (!username || !password || !domain)
 		return FALSE;
 
+	if (!*username)
+	{
+		size_t username_size = 0;
+		printf("%s", prompt[0]);
+		if (getline(username, &username_size, stdin) < 0)
+		{
+			WLog_ERR(TAG, "getline returned %s [%d]", strerror(errno), errno);
+			goto fail;
+		}
+
+		if (*username)
+		{
+			*username = StrSep(username, "\r");
+			*username = StrSep(username, "\n");
+		}
+	}
+
+	if (!*domain)
+	{
+		size_t domain_size = 0;
+		printf("%s", prompt[1]);
+		if (getline(domain, &domain_size, stdin) < 0)
+		{
+			WLog_ERR(TAG, "getline returned %s [%d]", strerror(errno), errno);
+			goto fail;
+		}
+
+		if (*domain)
+		{
+			*domain = StrSep(domain, "\r");
+			*domain = StrSep(domain, "\n");
+		}
+	}
+
+	if (!*password)
+	{
+		*password = calloc(password_size, sizeof(char));
+		if (!*password)
+			goto fail;
+
+		if (freerdp_passphrase_read(prompt[2], *password, password_size,
+			instance->settings->CredentialsFromStdin) == NULL)
+			goto fail;
+	}
+
 	return TRUE;
+
+fail:
+	free(*username);
+	free(*domain);
+	free(*password);
+
+	*username = NULL;
+	*domain = NULL;
+	*password = NULL;
+
+	return FALSE;
+}
+
+static BOOL xf_authenticate(freerdp* instance, char** username, char** password, char** domain)
+{
+	return xf_authenticate_raw(instance, FALSE, username, password, domain);
+}
+
+static BOOL xf_gw_authenticate(freerdp* instance, char** username, char** password, char** domain)
+{
+	return xf_authenticate_raw(instance, TRUE, username, password, domain);
 }
 
 /** Callback set in the rdp_freerdp structure, and used to make a certificate validation
@@ -1420,8 +1508,8 @@ void* xf_client_thread(void* param)
 	xfContext* xfc;
 	freerdp* instance;
 	rdpContext* context;
-	HANDLE inputEvent;
-	HANDLE inputThread;
+	HANDLE inputEvent = NULL;
+	HANDLE inputThread = NULL;
 	rdpChannels* channels;
 	rdpSettings* settings;
 
@@ -1532,8 +1620,8 @@ void* xf_client_thread(void* param)
 	if (settings->AsyncInput)
 	{
 		wMessageQueue* inputQueue = freerdp_get_message_queue(instance, FREERDP_INPUT_MESSAGE_QUEUE);
-		MessageQueue_PostQuit(inputQueue, 0);
-		WaitForSingleObject(inputThread, INFINITE);
+		if (MessageQueue_PostQuit(inputQueue, 0))
+			WaitForSingleObject(inputThread, INFINITE);
 		CloseHandle(inputThread);
 	}
 
@@ -1709,6 +1797,7 @@ static BOOL xfreerdp_client_new(freerdp* instance, rdpContext* context)
 	instance->PostConnect = xf_post_connect;
 	instance->PostDisconnect = xf_post_disconnect;
 	instance->Authenticate = xf_authenticate;
+	instance->GatewayAuthenticate = xf_gw_authenticate;
 	instance->VerifyCertificate = xf_verify_certificate;
 	instance->LogonErrorInfo = xf_logon_error_info;
 
@@ -1779,7 +1868,7 @@ static BOOL xfreerdp_client_new(freerdp* instance, rdpContext* context)
 	xfc->invert = (ImageByteOrder(xfc->display) == MSBFirst) ? TRUE : FALSE;
 	xfc->complex_regions = TRUE;
 
-	xfc->x11event = CreateFileDescriptorEvent(NULL, FALSE, FALSE, xfc->xfds);
+	xfc->x11event = CreateFileDescriptorEvent(NULL, FALSE, FALSE, xfc->xfds, WINPR_FD_READ);
 	if (!xfc->x11event)
 	{
 		WLog_ERR(TAG, "Could not create xfds event");

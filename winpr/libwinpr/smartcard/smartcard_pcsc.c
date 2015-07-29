@@ -127,7 +127,6 @@ struct _PCSC_SCARDHANDLE
 {
 	BOOL shared;
 	SCARDCONTEXT hSharedContext;
-	SCARDCONTEXT hPrivateContext;
 };
 
 struct _PCSC_READER
@@ -150,31 +149,7 @@ static BOOL g_PnP_Notification = TRUE;
 static unsigned int OSXVersion = 0;
 #endif
 
-/**
- * g_LockTransactions: enable pcsc-lite SCardBeginTransaction/SCardEndTransaction.
- *
- * After wasting months trying to fix and work around an appalling number of serious issues
- * in both the pcsc-lite client library and the pcscd daemon, I decided to just give up on
- * the transaction system. Using them inevitably leads to multiple SCardConnect calls deadlocking.
- *
- * It is not very clear how WinSCard transactions should lock: some logs on Windows show that is
- * possible to call SCardBeginTransaction twice on the same SCARDHANDLE without the second call
- * being blocked. Worse, in this specific case one corresponding SCardEndTransaction is missing.
- *
- * pcsc-lite apparently implements these "nested" transactions as well, because it allows the same
- * SCARDHANDLE to be locked more than once with a counter. However, there must be a bug even in the
- * latest pcsc-lite daemon as we still get deadlocked on SCardConnect calls when using those.
- *
- * Trying to disable nested transactions by letting pcsc-lite know about only one transaction level
- * gives the same deadlocks on SCardConnect. In other words, there are serious deadlock issues in
- * pcsc-lite even when disabling nested transactions.
- *
- * Transactions are simply too much of a pain to support properly without deadlocking the entire
- * smartcard subsystem. In practice, there is not much of a difference if locking occurs or not.
- * We could revisit transactions later on based on the demand, but for now we just want things to work.
- */
 
-static BOOL g_LockTransactions = FALSE;
 
 static wArrayList* g_Readers = NULL;
 static wListDictionary* g_CardHandles = NULL;
@@ -337,19 +312,33 @@ PCSC_SCARDCONTEXT* PCSC_EstablishCardContext(SCARDCONTEXT hContext)
 		return NULL;
 
 	pContext->hContext = hContext;
-	InitializeCriticalSectionAndSpinCount(&(pContext->lock), 4000);
+	if (!InitializeCriticalSectionAndSpinCount(&(pContext->lock), 4000))
+		goto error_spinlock;
 
 	if (!g_CardContexts)
+	{
 		g_CardContexts = ListDictionary_New(TRUE);
+		if (!g_CardContexts)
+			goto errors;
+	}
 
 	if (!g_Readers)
 	{
 		g_Readers = ArrayList_New(TRUE);
+		if (!g_Readers)
+			goto errors;
 		ArrayList_Object(g_Readers)->fnObjectFree = (OBJECT_FREE_FN) PCSC_ReaderAliasFree;
 	}
 
-	ListDictionary_Add(g_CardContexts, (void*) hContext, (void*) pContext);
+	if (!ListDictionary_Add(g_CardContexts, (void*) hContext, (void*) pContext))
+		goto errors;
 	return pContext;
+
+errors:
+	DeleteCriticalSection(&(pContext->lock));
+error_spinlock:
+	free(pContext);
+	return NULL;
 }
 
 void PCSC_ReleaseCardContext(SCARDCONTEXT hContext)
@@ -425,7 +414,7 @@ SCARDCONTEXT PCSC_GetCardContextFromHandle(SCARDHANDLE hCard)
 	if (!pCard)
 		return 0;
 
-	return pCard->hPrivateContext;
+	return pCard->hSharedContext;
 }
 
 BOOL PCSC_WaitForCardAccess(SCARDCONTEXT hContext, SCARDHANDLE hCard, BOOL shared)
@@ -539,7 +528,7 @@ BOOL PCSC_ReleaseCardAccess(SCARDCONTEXT hContext, SCARDHANDLE hCard)
 	return TRUE;
 }
 
-PCSC_SCARDHANDLE* PCSC_ConnectCardHandle(SCARDCONTEXT hSharedContext, SCARDCONTEXT hPrivateContext, SCARDHANDLE hCard)
+PCSC_SCARDHANDLE* PCSC_ConnectCardHandle(SCARDCONTEXT hSharedContext, SCARDHANDLE hCard)
 {
 	PCSC_SCARDHANDLE* pCard;
 	PCSC_SCARDCONTEXT* pContext;
@@ -552,20 +541,27 @@ PCSC_SCARDHANDLE* PCSC_ConnectCardHandle(SCARDCONTEXT hSharedContext, SCARDCONTE
 	}
 
 	pCard = (PCSC_SCARDHANDLE*) calloc(1, sizeof(PCSC_SCARDHANDLE));
-
 	if (!pCard)
 		return NULL;
 
 	pCard->hSharedContext = hSharedContext;
-	pCard->hPrivateContext = hPrivateContext;
-	pContext->dwCardHandleCount++;
 
 	if (!g_CardHandles)
+	{
 		g_CardHandles = ListDictionary_New(TRUE);
+		if (!g_CardHandles)
+			goto error;
+	}
 
-	ListDictionary_Add(g_CardHandles, (void*) hCard, (void*) pCard);
+	if (!ListDictionary_Add(g_CardHandles, (void*) hCard, (void*) pCard))
+		goto error;
 
+	pContext->dwCardHandleCount++;
 	return pCard;
+
+error:
+	free(pCard);
+	return NULL;
 }
 
 void PCSC_DisconnectCardHandle(SCARDHANDLE hCard)
@@ -579,7 +575,6 @@ void PCSC_DisconnectCardHandle(SCARDHANDLE hCard)
 		return;
 
 	pContext = PCSC_GetCardContextData(pCard->hSharedContext);
-	PCSC_SCardReleaseContext_Internal(pCard->hPrivateContext);
 	free(pCard);
 
 	if (!g_CardHandles)
@@ -628,14 +623,27 @@ BOOL PCSC_AddReaderNameAlias(char* namePCSC, char* nameWinSCard)
 		return TRUE;
 
 	reader = (PCSC_READER*) calloc(1, sizeof(PCSC_READER));
-
 	if (!reader)
 		return FALSE;
 
 	reader->namePCSC = _strdup(namePCSC);
+	if (!reader->namePCSC)
+		goto error_namePSC;
+
 	reader->nameWinSCard = _strdup(nameWinSCard);
-	ArrayList_Add(g_Readers, reader);
+	if (!reader->nameWinSCard)
+		goto error_nameWinSCard;
+	if (ArrayList_Add(g_Readers, reader) < 0)
+		goto error_add;
 	return TRUE;
+
+error_add:
+	free(reader->nameWinSCard);
+error_nameWinSCard:
+	free(reader->namePCSC);
+error_namePSC:
+	free(reader);
+	return FALSE;
 }
 
 static int PCSC_AtoiWithLength(const char* str, int length)
@@ -708,7 +716,7 @@ char* PCSC_ConvertReaderNameToWinSCard(const char* name)
 	if (!name)
 		return NULL;
 	memset(tokens, 0, sizeof(tokens));
-	
+
 	length = strlen(name);
 
 	if (length < 10)
@@ -890,12 +898,16 @@ char* PCSC_ConvertReaderNamesToPCSC(const char* names, LPDWORD pcchReaders)
 	return namesPCSC;
 }
 
-void PCSC_AddMemoryBlock(SCARDCONTEXT hContext, void* pvMem)
+BOOL PCSC_AddMemoryBlock(SCARDCONTEXT hContext, void* pvMem)
 {
 	if (!g_MemoryBlocks)
+	{
 		g_MemoryBlocks = ListDictionary_New(TRUE);
+		if (!g_MemoryBlocks)
+			return FALSE;
+	}
 
-	ListDictionary_Add(g_MemoryBlocks, pvMem, (void*) hContext);
+	return ListDictionary_Add(g_MemoryBlocks, pvMem, (void*) hContext);
 }
 
 void* PCSC_RemoveMemoryBlock(SCARDCONTEXT hContext, void* pvMem)
@@ -914,7 +926,11 @@ void* PCSC_SCardAllocMemory(SCARDCONTEXT hContext, size_t size)
 	if (!pvMem)
 		return NULL;
 
-	PCSC_AddMemoryBlock(hContext, pvMem);
+	if (!PCSC_AddMemoryBlock(hContext, pvMem))
+	{
+		free(pvMem);
+		return NULL;
+	}
 	return pvMem;
 }
 
@@ -1669,7 +1685,6 @@ WINSCARDAPI LONG WINAPI PCSC_SCardConnect_Internal(SCARDCONTEXT hContext,
 	char* szReaderPCSC;
 	LONG status = SCARD_S_SUCCESS;
 	PCSC_SCARDHANDLE* pCard = NULL;
-	SCARDCONTEXT hPrivateContext = 0;
 	PCSC_DWORD pcsc_dwShareMode = (PCSC_DWORD) dwShareMode;
 	PCSC_DWORD pcsc_dwPreferredProtocols = 0;
 	PCSC_DWORD pcsc_dwActiveProtocol = 0;
@@ -1680,11 +1695,6 @@ WINSCARDAPI LONG WINAPI PCSC_SCardConnect_Internal(SCARDCONTEXT hContext,
 	shared = (dwShareMode == SCARD_SHARE_DIRECT) ? TRUE : FALSE;
 
 	access = PCSC_WaitForCardAccess(hContext, 0, shared);
-
-	status = PCSC_SCardEstablishContext_Internal(SCARD_SCOPE_SYSTEM, NULL, NULL, &hPrivateContext);
-
-	if (status != SCARD_S_SUCCESS)
-		return status;
 
 	szReaderPCSC = PCSC_GetReaderNameFromAlias((char*) szReader);
 
@@ -1701,22 +1711,18 @@ WINSCARDAPI LONG WINAPI PCSC_SCardConnect_Internal(SCARDCONTEXT hContext,
 	else
 		pcsc_dwPreferredProtocols = (PCSC_DWORD) PCSC_ConvertProtocolsFromWinSCard(dwPreferredProtocols);
 
-	status = (LONG) g_PCSC.pfnSCardConnect(hPrivateContext, szReaderPCSC,
+	status = (LONG) g_PCSC.pfnSCardConnect(hContext, szReaderPCSC,
 				pcsc_dwShareMode, pcsc_dwPreferredProtocols, phCard, &pcsc_dwActiveProtocol);
 
 	status = PCSC_MapErrorCodeToWinSCard(status);
 
 	if (status == SCARD_S_SUCCESS)
 	{
-		pCard = PCSC_ConnectCardHandle(hContext, hPrivateContext, *phCard);
+		pCard = PCSC_ConnectCardHandle(hContext, *phCard);
 		*pdwActiveProtocol = PCSC_ConvertProtocolsToWinSCard((DWORD) pcsc_dwActiveProtocol);
 
 		pCard->shared = shared;
 		PCSC_WaitForCardAccess(hContext, pCard->hSharedContext, shared);
-	}
-	else
-	{
-		PCSC_SCardReleaseContext(hPrivateContext);
 	}
 
 	return status;
@@ -1833,11 +1839,8 @@ WINSCARDAPI LONG WINAPI PCSC_SCardBeginTransaction(SCARDHANDLE hCard)
 	if (pContext->isTransactionLocked)
 		return SCARD_S_SUCCESS; /* disable nested transactions */
 
-	if (g_LockTransactions)
-	{
-		status = (LONG) g_PCSC.pfnSCardBeginTransaction(hCard);
-		status = PCSC_MapErrorCodeToWinSCard(status);
-	}
+	status = (LONG) g_PCSC.pfnSCardBeginTransaction(hCard);
+	status = PCSC_MapErrorCodeToWinSCard(status);
 
 	pContext->isTransactionLocked = TRUE;
 	return status;
@@ -1868,11 +1871,8 @@ WINSCARDAPI LONG WINAPI PCSC_SCardEndTransaction(SCARDHANDLE hCard, DWORD dwDisp
 	if (!pContext->isTransactionLocked)
 		return SCARD_S_SUCCESS; /* disable nested transactions */
 
-	if (g_LockTransactions)
-	{
-		status = (LONG) g_PCSC.pfnSCardEndTransaction(hCard, pcsc_dwDisposition);
-		status = PCSC_MapErrorCodeToWinSCard(status);
-	}
+	status = (LONG) g_PCSC.pfnSCardEndTransaction(hCard, pcsc_dwDisposition);
+	status = PCSC_MapErrorCodeToWinSCard(status);
 
 	pContext->isTransactionLocked = FALSE;
 
@@ -2962,26 +2962,6 @@ PSCardApiFunctionTable PCSC_GetSCardApiFunctionTable(void)
 
 int PCSC_InitializeSCardApi(void)
 {
-	DWORD nSize;
-	char* env = NULL;
-
-	nSize = GetEnvironmentVariableA("WINPR_WINSCARD_LOCK_TRANSACTIONS", NULL, 0);
-
-	if (nSize)
-	{
-		env = (LPSTR) malloc(nSize);
-		if (!env)
-			return -1;
-		nSize = GetEnvironmentVariableA("WINPR_WINSCARD_LOCK_TRANSACTIONS", env, nSize);
-
-		if (strcmp(env, "1") == 0)
-			g_LockTransactions = TRUE;
-		else if (strcmp(env, "0") == 0)
-			g_LockTransactions = FALSE;
-
-		free(env);
-	}
-
 	/* Disable pcsc-lite's (poor) blocking so we can handle it ourselves */
 	SetEnvironmentVariableA("PCSCLITE_NO_BLOCKING", "1");
 

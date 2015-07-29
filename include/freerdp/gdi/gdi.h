@@ -129,9 +129,11 @@
 #define GDIOBJECT_REGION   0x05
 
 /* Region return values */
+#ifndef NULLREGION
 #define NULLREGION         0x01
 #define SIMPLEREGION       0x02
 #define COMPLEXREGION      0x03
+#endif
 
 struct _GDIOBJECT
 {
@@ -313,7 +315,7 @@ struct rdp_gdi
 extern "C" {
 #endif
 
-FREERDP_API UINT32 gdi_rop3_code(BYTE code);
+FREERDP_API DWORD gdi_rop3_code(BYTE code);
 FREERDP_API UINT32 gdi_get_pixel_format(UINT32 bitsPerPixel, BOOL vFlip);
 FREERDP_API BYTE* gdi_get_bitmap_pointer(HGDI_DC hdcBmp, int x, int y);
 FREERDP_API BYTE* gdi_get_brush_pointer(HGDI_DC hdcBrush, int x, int y);

@@ -85,34 +85,40 @@ const char* const X11_EVENT_STRINGS[] =
 #define DEBUG_X11(fmt, ...) do { } while (0)
 #endif
 
-int xf_event_action_script_init(xfContext* xfc)
+BOOL xf_event_action_script_init(xfContext* xfc)
 {
-	int exitCode;
 	char* xevent;
 	FILE* actionScript;
 	char buffer[1024] = { 0 };
 	char command[1024] = { 0 };
 
 	xfc->xevents = ArrayList_New(TRUE);
+	if (!xfc->xevents)
+		return FALSE;
 	ArrayList_Object(xfc->xevents)->fnObjectFree = free;
 
 	sprintf_s(command, sizeof(command), "%s xevent", xfc->actionScript);
 
 	actionScript = popen(command, "r");
 
-	if (actionScript < 0)
-		return -1;
+	if (!actionScript)
+		return FALSE;
 
 	while (fgets(buffer, sizeof(buffer), actionScript))
 	{
 		strtok(buffer, "\n");
 		xevent = _strdup(buffer);
-		ArrayList_Add(xfc->xevents, xevent);
+		if (!xevent || ArrayList_Add(xfc->xevents, xevent) < 0)
+		{
+			ArrayList_Free(xfc->xevents);
+			xfc->xevents = NULL;
+			return FALSE;
+		}
 	}
 
-	exitCode = pclose(actionScript);
+	pclose(actionScript);
 
-	return 1;
+	return TRUE;
 }
 
 void xf_event_action_script_free(xfContext* xfc)
@@ -124,23 +130,22 @@ void xf_event_action_script_free(xfContext* xfc)
 	}
 }
 
-int xf_event_execute_action_script(xfContext* xfc, XEvent* event)
+static BOOL xf_event_execute_action_script(xfContext* xfc, XEvent* event)
 {
 	int index;
 	int count;
 	char* name;
-	int exitCode;
 	FILE* actionScript;
 	BOOL match = FALSE;
 	const char* xeventName;
 	char buffer[1024] = { 0 };
 	char command[1024] = { 0 };
 
-	if (!xfc->actionScript)
-		return 1;
+	if (!xfc->actionScript || !xfc->xevents)
+		return FALSE;
 
 	if (event->type > (sizeof(X11_EVENT_STRINGS) / sizeof(const char*)))
-		return 1;
+		return FALSE;
 
 	xeventName = X11_EVENT_STRINGS[event->type];
 
@@ -158,24 +163,24 @@ int xf_event_execute_action_script(xfContext* xfc, XEvent* event)
 	}
 
 	if (!match)
-		return 1;
+		return FALSE;
 
 	sprintf_s(command, sizeof(command), "%s xevent %s %d",
 			xfc->actionScript, xeventName, (int) xfc->window->handle);
 
 	actionScript = popen(command, "r");
 
-	if (actionScript < 0)
-		return -1;
+	if (!actionScript)
+		return FALSE;
 
 	while (fgets(buffer, sizeof(buffer), actionScript))
 	{
 		strtok(buffer, "\n");
 	}
 
-	exitCode = pclose(actionScript);
+	pclose(actionScript);
 
-	return 1;
+	return TRUE;
 }
 
 void xf_event_adjust_coordinates(xfContext* xfc, int* x, int *y)

@@ -11,6 +11,7 @@
 #import <freerdp/channels/channels.h>
 #import <freerdp/client/channels.h>
 #import <freerdp/client/cmdline.h>
+#import <freerdp/freerdp.h>
 
 #import "ios_freerdp.h"
 #import "ios_freerdp_ui.h"
@@ -18,7 +19,6 @@
 
 #import "RDPSession.h"
 #import "Utils.h"
-
 
 #pragma mark Connection helpers
 
@@ -235,18 +235,33 @@ int ios_run_freerdp(freerdp* instance)
 #pragma mark -
 #pragma mark Context callbacks
 
-int ios_context_new(freerdp* instance, rdpContext* context)
+BOOL ios_context_new(freerdp* instance, rdpContext* context)
 {
-	mfInfo* mfi = (mfInfo*)calloc(1, sizeof(mfInfo));
-	((mfContext*) context)->mfi = mfi;
-	context->channels = freerdp_channels_new();
-	ios_events_create_pipe(mfi);
+	mfInfo* mfi;
+
+	if (!(mfi = (mfInfo*)calloc(1, sizeof(mfInfo))))
+		goto fail_mfi;
+
+	if (!(context->channels = freerdp_channels_new()))
+		goto fail_channels;
 	
+	if (!ios_events_create_pipe(mfi))
+		goto fail_events;
+
+	((mfContext*) context)->mfi = mfi;
 	mfi->_context = context;
 	mfi->context = (mfContext*)context;
 	mfi->context->settings = instance->settings;
 	mfi->instance = instance;
-	return 0;
+	return TRUE;
+
+fail_events:
+	freerdp_channels_free(context->channels);
+	context->channels = NULL;
+fail_channels:
+	free(mfi);
+fail_mfi:
+	return FALSE;
 }
 
 void ios_context_free(freerdp* instance, rdpContext* context)
@@ -264,6 +279,8 @@ void ios_context_free(freerdp* instance, rdpContext* context)
 freerdp* ios_freerdp_new()
 {
 	freerdp* inst = freerdp_new();
+	if (!inst)
+		return NULL;
 	
 	inst->PreConnect = ios_pre_connect;
 	inst->PostConnect = ios_post_connect;
@@ -282,6 +299,14 @@ freerdp* ios_freerdp_new()
 	free(inst->settings->ConfigPath);
 	inst->settings->HomePath = strdup([home_path UTF8String]);
 	inst->settings->ConfigPath = strdup([[home_path stringByAppendingPathComponent:@".freerdp"] UTF8String]);
+	if (!inst->settings->HomePath || !inst->settings->ConfigPath)
+	{
+		free(inst->settings->HomePath);
+		free(inst->settings->ConfigPath);
+		freerdp_context_free(inst);
+		freerdp_free(inst);
+		return NULL;
+	}
 
 	return inst;
 }

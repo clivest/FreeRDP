@@ -674,7 +674,8 @@ DWORD transport_get_event_handles(rdpTransport* transport, HANDLE* events, DWORD
 	{
 		if (events && (nCount < count))
 		{
-			BIO_get_event(transport->frontBio, &events[nCount]);
+			if (BIO_get_event(transport->frontBio, &events[nCount]) != 1)
+				return 0;
 			nCount++;
 		}
 	}
@@ -744,8 +745,12 @@ int transport_check_fds(rdpTransport* transport)
 	int status;
 	int recv_status;
 	wStream* received;
+	HANDLE event;
 
 	if (!transport)
+		return -1;
+
+	if (BIO_get_event(transport->frontBio, &event) != 1)
 		return -1;
 
 	/**
@@ -755,6 +760,9 @@ int transport_check_fds(rdpTransport* transport)
 	 * wait for a socket to get signaled that data is available
 	 * (which may never happen).
 	 */
+#ifdef _WIN32
+	ResetEvent(event);
+#endif
 	for (;;)
 	{
 		/**
@@ -768,6 +776,8 @@ int transport_check_fds(rdpTransport* transport)
 		 */
 		if ((status = transport_read_pdu(transport, transport->ReceiveBuffer)) <= 0)
 		{
+			if (status < 0)
+				WLog_DBG(TAG, "transport_check_fds: transport_read_pdu() - %i", status);
 			return status;
 		}
 
@@ -790,7 +800,10 @@ int transport_check_fds(rdpTransport* transport)
 		}
 
 		if (recv_status < 0)
+		{
+			WLog_ERR(TAG, "transport_check_fds: transport->ReceiveCallback() - %i", recv_status);
 			return -1;
+		}
 	}
 
 	return 0;
@@ -921,6 +934,7 @@ static void* transport_client_thread(void* arg)
 
 		if (transport->layer == TRANSPORT_LAYER_CLOSED)
 		{
+			WLog_DBG(TAG, "TRANSPORT_LAYER_CLOSED");
 			rdp_set_error_info(rdp, ERRINFO_PEER_DISCONNECTED);
 			break;
 		}
@@ -934,6 +948,7 @@ static void* transport_client_thread(void* arg)
 		{
 			if (!freerdp_check_event_handles(context))
 			{
+				WLog_ERR(TAG, "freerdp_check_event_handles()");
 				rdp_set_error_info(rdp, ERRINFO_PEER_DISCONNECTED);
 				break;
 			}
@@ -958,7 +973,7 @@ out:
 rdpTransport* transport_new(rdpContext* context)
 {
 	rdpTransport* transport;
-	
+
 	transport = (rdpTransport*) calloc(1, sizeof(rdpTransport));
 
 	if (!transport)

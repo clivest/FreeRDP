@@ -323,7 +323,8 @@ wStream* rdg_build_http_request(rdpRdg* rdg, char* method)
 	s = http_request_write(rdg->http, request);
 	http_request_free(request);
 
-	Stream_SealLength(s);
+	if (s)
+		Stream_SealLength(s);
 	return s;
 }
 
@@ -435,9 +436,7 @@ BOOL rdg_process_in_channel_response(rdpRdg* rdg, HttpResponse* response)
 	s = rdg_build_http_request(rdg, "RDG_IN_DATA");
 
 	if (!s)
-	{
 		return FALSE;
-	}
 
 	status = tls_write_all(rdg->tlsIn, Stream_Buffer(s), Stream_Length(s));
 
@@ -489,12 +488,15 @@ BOOL rdg_process_handshake_response(rdpRdg* rdg, wStream* s)
 {
 	HRESULT errorCode;
 
-	WLog_DBG(TAG, "Handshake response recieved");
+	WLog_DBG(TAG, "Handshake response received");
 
 	if (rdg->state != RDG_CLIENT_STATE_HANDSHAKE)
 	{
 		return FALSE;
 	}
+
+	if (Stream_GetRemainingLength(s) < 12)
+		return FALSE;
 
 	Stream_Seek(s, 8);
 	Stream_Read_UINT32(s, errorCode);
@@ -519,6 +521,9 @@ BOOL rdg_process_tunnel_response(rdpRdg* rdg, wStream* s)
 		return FALSE;
 	}
 
+	if (Stream_GetRemainingLength(s) < 14)
+		return FALSE;
+
 	Stream_Seek(s, 10);
 	Stream_Read_UINT32(s, errorCode);
 
@@ -541,6 +546,9 @@ BOOL rdg_process_tunnel_authorization_response(rdpRdg* rdg, wStream* s)
 	{
 		return FALSE;
 	}
+
+	if (Stream_GetRemainingLength(s) < 12)
+		return FALSE;
 
 	Stream_Seek(s, 8);
 	Stream_Read_UINT32(s, errorCode);
@@ -565,6 +573,9 @@ BOOL rdg_process_channel_response(rdpRdg* rdg, wStream* s)
 		return FALSE;
 	}
 
+	if (Stream_GetRemainingLength(s) < 12)
+		return FALSE;
+
 	Stream_Seek(s, 8);
 	Stream_Read_UINT32(s, errorCode);
 
@@ -585,8 +596,11 @@ BOOL rdg_process_packet(rdpRdg* rdg, wStream* s)
 	UINT16 type;
 
 	Stream_SetPosition(s, 0);
-	Stream_Read_UINT16(s, type);
-	Stream_SetPosition(s, 0);
+
+	if (Stream_GetRemainingLength(s) < 2)
+		return FALSE;
+
+	Stream_Peek_UINT16(s, type);
 
 	switch (type)
 	{
@@ -766,9 +780,24 @@ BOOL rdg_ncacn_http_ntlm_init(rdpRdg* rdg, rdpTls* tls)
 
 			if (settings->GatewayUseSameCredentials)
 			{
-				settings->Username = _strdup(settings->GatewayUsername);
-				settings->Domain = _strdup(settings->GatewayDomain);
-				settings->Password = _strdup(settings->GatewayPassword);
+				if (settings->GatewayUsername)
+				{
+					free(settings->Username);
+					if (!(settings->Username = _strdup(settings->GatewayUsername)))
+						return FALSE;
+				}
+				if (settings->GatewayDomain)
+				{
+					free(settings->Domain);
+					if (!(settings->Domain = _strdup(settings->GatewayDomain)))
+						return FALSE;
+				}
+				if (settings->GatewayPassword)
+				{
+					free(settings->Password);
+					if (!(settings->Password = _strdup(settings->GatewayPassword)))
+						return FALSE;
+				}
 			}
 		}
 	}

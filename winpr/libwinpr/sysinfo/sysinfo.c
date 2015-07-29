@@ -188,17 +188,20 @@ BOOL GetComputerNameA(LPSTR lpBuffer, LPDWORD lpnSize)
 	if (dot)
 		length = dot - hostname;
 
-	if (*lpnSize <= length)
-	{
-		*lpnSize = length + 1;
-		return FALSE;
-	}
-
 	if (!lpBuffer)
 		return FALSE;
 
+	if (*lpnSize <= length)
+	{
+		SetLastError(ERROR_BUFFER_OVERFLOW);
+		*lpnSize = length;
+		return FALSE;
+	}
+
+
 	CopyMemory(lpBuffer, hostname, length);
 	lpBuffer[length] = '\0';
+	*lpnSize = length;
 	return TRUE;
 }
 
@@ -224,7 +227,7 @@ BOOL GetComputerNameExA(COMPUTER_NAME_FORMAT NameType, LPSTR lpBuffer, LPDWORD l
 		case ComputerNamePhysicalDnsFullyQualified:
 			if (*lpnSize <= length)
 			{
-				*lpnSize = length + 1;
+				*lpnSize = length;
 				return FALSE;
 			}
 
@@ -677,6 +680,21 @@ BOOL IsProcessorFeaturePresent(DWORD ProcessorFeature)
 }
 
 #endif //_WIN32
+
+DWORD GetTickCountPrecise(void)
+{
+#ifdef _WIN32
+	LARGE_INTEGER freq;
+	LARGE_INTEGER current;
+
+	QueryPerformanceFrequency(&freq);
+	QueryPerformanceCounter(&current);
+
+	return (DWORD) (current.QuadPart * 1000LL / freq.QuadPart);
+#else
+	return GetTickCount();
+#endif
+}
 
 BOOL IsProcessorFeaturePresentEx(DWORD ProcessorFeature)
 {

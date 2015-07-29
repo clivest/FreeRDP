@@ -14,6 +14,9 @@
 #define CMAKE_SHARED_LIBRARY_SUFFIX "${CMAKE_SHARED_LIBRARY_SUFFIX}"
 #define CMAKE_SHARED_LIBRARY_PREFIX  "${CMAKE_SHARED_LIBRARY_PREFIX}"
 
+#define FREERDP_VENDOR_STRING "${VENDOR}"
+#define FREERDP_PRODUCT_STRING "${PRODUCT}"
+
 /* Include files */
 #cmakedefine HAVE_FCNTL_H
 #cmakedefine HAVE_UNISTD_H
@@ -22,6 +25,7 @@
 #cmakedefine HAVE_SYS_MODEM_H
 #cmakedefine HAVE_SYS_FILIO_H
 #cmakedefine HAVE_SYS_SELECT_H
+#cmakedefine HAVE_SYS_SOCKIO_H
 #cmakedefine HAVE_SYS_STRTIO_H
 #cmakedefine HAVE_EVENTFD_H
 #cmakedefine HAVE_TIMERFD_H
